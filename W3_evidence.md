@@ -4,74 +4,70 @@
 
 | Thông tin | Giá trị |
 |-----------|---------|
-| **Nhóm** | Nhóm X |
-| **Thành viên** | Nguyễn Văn A · Trần Thị B · Lê Văn C · Phạm Thị D |
-| **Database path** | RDS PostgreSQL / Relational |
-| **W2 Evidence commit** | [commit abc123](https://github.com/org/repo/commit/abc123) |
-| **Tuần** | W3 — 20-24/4/2026 |
+| **Nhóm** | Nhóm 3 |
+| **Thành viên** | Đoàn Văn An <br> Ngô Thanh Kiên <br> Nguyễn Minh Thanh <br> Lê Trần Ánh Nhung <br> Nguyễn Thành Đạt <br> Đinh Văn Ty <br> Phan Lê Thanh Hoàng <br> Hoàng Minh Hải <br> Từ Phúc Nguyên <br> Nguyễn Văn Toàn |
+| **Database path** | RDS SQL Server|
+| **W2 Evidence commit** | [none](https://github.com/org/repo/commit/abc123) |
+| **Tuần** | W3 — 20-24/04/2026  |
 
-**W2 Trainer Feedback đã được address:**
-> Trainer noted IAM policies on EC2 role contained wildcard `Action: "*"`. Fixed in W3: Lambda execution role now scoped to specific actions (`bedrock:RetrieveAndGenerate`, `dynamodb:GetItem`, `s3:GetObject`) and specific resource ARNs. Wildcards removed.
-<!-- EDIT: Thay bằng feedback thật từ trainer W2 của nhóm -->
+
 
 ---
 
 ## Section 1 — W2 Recap
 
-**Diagram W2:** *(copy hoặc link diagram W2 vào đây)*
+**Diagram W2:** ![image](https://hackmd.io/_uploads/HJKSVJuaWx.png)
+
 <!-- EDIT: Paste link/ảnh diagram W2 -->
 
 **1 feedback cụ thể từ W2 và cách W3 fix:**
 
 | W2 Feedback | Cách W3 address |
 |-------------|-----------------|
-| IAM role trên EC2 có `Action: "*"` — quá rộng | Lambda execution role W3 scope về `bedrock:RetrieveAndGenerate` + `s3:GetObject` với ARN cụ thể |
-<!-- EDIT: Đổi feedback và action thật -->
+| RDS chưa encryption  | RDS encryption at rest |
+
 
 ---
 
 ## Section 2 — Data Access Pattern Log
 
-### Part A — 3 Access Patterns Thật Từ App
+### Part A - 3 Access Patterns
 
-<!-- EDIT: Đổi tên pattern, frequency cho đúng với app của nhóm -->
+| # | Access Pattern | Tần suất ước lượng |
+|---|---|---|
+| 1 | Lấy toàn bộ đơn hàng của một user, sắp xếp theo ngày giảm dần | ~50 lần/phút lúc cao điểm |
+| 2 | Tra cứu product theo ID | ~40 lần/phút lúc cao điểm |
+| 3 | Tạo một order mới cùng nhiều order item theo kiểu atomic | ~10 lần/phút lúc cao điểm |
 
-| # | Access Pattern | Frequency (ước lượng) |
-|---|---------------|----------------------|
-| 1 | Get all orders for a user, sorted by `created_at DESC` | ~50 calls/phút lúc peak |
-| 2 | Look up product details by `product_id` | ~200 calls/phút |
-| 3 | Decrement inventory + insert order trong 1 transaction khi user checkout | ~10 calls/phút |
+---
 
-### Part B — Engine + Paradigm + Mechanism Cho Mỗi Pattern
+### Part B - Engine + Paradigm + Mechanism cho từng pattern
 
-<!-- EDIT: Đổi paradigm/engine nếu không dùng Relational/RDS -->
+| # | Pattern | Paradigm | Engine | Mechanism | Vì sao hiệu quả |
+|---|---|---|---|---|---|
+| 1 | Lấy toàn bộ đơn hàng của một user, sắp xếp theo ngày giảm dần | Relational | RDS SQL Server | Non-clustered composite index `idx_order_user_date` trên bảng `[ORDER](UserID, OrderDateTime DESC)` kết hợp với truy vấn `WHERE UserID = @UserID ORDER BY OrderDateTime DESC` | SQL Server có thể dùng `Index Seek` theo `UserID`, sau đó đọc dữ liệu theo thứ tự `OrderDateTime DESC` ngay trên index. Cách này giảm chi phí quét bảng và tránh bước sort bổ sung, phù hợp với màn hình lịch sử đơn hàng. |
+| 2 | Tra cứu product theo ID | Relational | RDS SQL Server | Primary key trên `PRODUCT(ProductID)` | Đây là dạng point lookup theo khóa chính. SQL Server có thể truy xuất trực tiếp đúng record với độ trễ thấp và hiệu năng ổn định, phù hợp với trang chi tiết sản phẩm và các luồng đọc dữ liệu liên quan đến cart. |
+| 3 | Tạo một order mới cùng nhiều order item theo kiểu atomic | Relational | RDS SQL Server | `BEGIN TRANSACTION / COMMIT`, `OUTPUT INSERTED.OrderID`, kết hợp `WITH (UPDLOCK, ROWLOCK)` khi đọc tồn kho từ `PRODUCT_SIZE` trước khi cập nhật số lượng | Luồng checkout phải tạo order, tạo nhiều order item và giảm tồn kho trong cùng một transaction ACID. Nếu bất kỳ bước nào lỗi thì toàn bộ transaction sẽ rollback. Cơ chế locking giúp tránh race condition và giảm nguy cơ overselling. |
 
-| # | Pattern | Paradigm | Engine | Mechanism | Tại sao hiệu quả |
-|---|---------|----------|--------|-----------|-----------------|
-| 1 | Get orders by user | Relational | RDS PostgreSQL | Index `idx_orders_user_id` trên `orders.user_id` + `ORDER BY created_at DESC` | Index Scan tránh Seq Scan; sort trên indexed column không cần filesort |
-| 2 | Lookup product by ID | Relational | RDS PostgreSQL | Primary key lookup trên `products.product_id` (B-tree) | O(1) PK lookup, execution time <1ms |
-| 3 | Atomic checkout transaction | Relational | RDS PostgreSQL | `BEGIN` / `COMMIT` ACID transaction qua bảng `orders` + `inventory` | Rollback tự động nếu bất kỳ statement nào fail; `SELECT FOR UPDATE` lock row tránh race condition |
+### Phần C Wrong-Paradigm Test
 
-> **Nếu self-hosted trên EC2:** thêm cột "Backup/HA Plan" — ví dụ: *"Daily `pg_dump` cron lúc 02:00 AM, upload lên S3. Read replica trên EC2 instance thứ 2 cùng AZ."*
->
-> **Nếu DocumentDB / Neptune:** thêm cột "Monthly Cost Estimate" — ví dụ: *"db.r6g.large ~$220/tháng (on-demand, ap-southeast-1)."*
+**Pattern được chọn để test: Pattern #3 - Atomic checkout transaction**
 
-### Part C — "Wrong-Paradigm" Test
+Nếu Pattern #3 được triển khai trên **key-value engine như DynamoDB**, hệ thống sẽ phải dùng `TransactWriteItems` để insert order, insert order item và update tồn kho. Dù DynamoDB có hỗ trợ transactional write, nó vẫn kém phù hợp hơn SQL Server trong use case này vì một số lý do.
 
-<!-- EDIT: Chọn 1 pattern, giải thích tại sao paradigm khác sẽ fail hoặc expensive -->
+Thứ nhất, checkout trong hệ thống này không phải chỉ là một thao tác ghi đơn giản. Nó liên quan tới nhiều record có quan hệ với nhau giữa `ORDER`, `ORDER_ITEM` và `PRODUCT_SIZE`, đồng thời còn phải kiểm tra tồn kho trước khi xác nhận thanh toán. Trong SQL Server, phần logic này phù hợp tự nhiên với relational transaction và ACID guarantee mạnh.
 
-**Pattern đã chọn để test: Pattern #3 — Atomic checkout transaction**
+Thứ hai, SQL Server hỗ trợ các chiến lược locking như `UPDLOCK` và `ROWLOCK`, cho phép ứng dụng khóa đúng dòng dữ liệu tồn kho trong lúc kiểm tra và cập nhật số lượng. Điều này đặc biệt quan trọng khi nhiều user cùng mua một size sản phẩm trong cùng thời điểm. DynamoDB không có mô hình row-level locking tương đương, nên việc chống overselling sẽ phức tạp hơn và thường phải dựa vào conditional write cùng logic bổ sung ở tầng application.
 
-Pattern #3 (atomic checkout) trên **key-value engine (DynamoDB)** sẽ cần `TransactWriteItems` qua nhiều items — hết transaction budget 25 items/request nếu order có nhiều line items, và cost per-transactional-request cao hơn standard write. Quan trọng hơn, DynamoDB `TransactWriteItems` không lock rows giữa reads và writes; nếu inventory được đọc ra trước rồi mới ghi, có race condition khi 2 user checkout cùng lúc cùng 1 sản phẩm. Relational ACID transaction dùng `SELECT FOR UPDATE` lock row ngay từ lúc đọc, loại bỏ race condition này hoàn toàn — đây là lý do paradigm **relational** fit với checkout flow hơn key-value.
+Thứ ba, dữ liệu nghiệp vụ của hệ thống e-commerce này có quan hệ rõ ràng: một user có nhiều order, một order có nhiều order item, và mỗi order item tham chiếu tới một product size cụ thể. SQL Server xử lý kiểu dữ liệu quan hệ này tốt hơn nhờ primary key, foreign key, transaction integrity và các indexed query.
+
+Vì vậy, **relational database dùng SQL Server** là lựa chọn phù hợp hơn cho pattern checkout của hệ thống này vì nó cung cấp consistency mạnh hơn, xử lý transaction đơn giản hơn và hỗ trợ tốt hơn cho dữ liệu nghiệp vụ có quan hệ.
 
 ---
 
 ## Section 3 — Deployment Evidence
 
-> Mỗi entry = 1 screenshot (console hoặc CLI) + 1-2 dòng notes giải thích WHY.
-> Thay `<!-- EDIT: ... -->` và đường dẫn ảnh bằng thật trước khi nộp.
 
----
 
 ### 3.1 Database — Chung (mọi engine)
 
@@ -79,11 +75,13 @@ Pattern #3 (atomic checkout) trên **key-value engine (DynamoDB)** sẽ cần `T
 
 - [x] Database instance deployed trong **private subnet**, không có public IP
 
-![DB trong private subnet](./screenshots/s3-db-private-subnet.png)
-<!-- EDIT: Chụp màn hình RDS console → tab Connectivity, chỉ subnet ID + "Publicly accessible: No" -->
+![2 subnet](https://hackmd.io/_uploads/SkkXrB_6Zx.jpg)
+![subnet1](https://hackmd.io/_uploads/H1REHB_TWx.jpg)
+![subnet2](https://hackmd.io/_uploads/ByPHHr_abx.jpg)
 
-**Notes:** Instance `xbrain-db` nằm trong subnet `subnet-0abc1234` (10.0.3.0/24). Route table của subnet không có route `0.0.0.0/0 → igw-*`, chỉ có local route. Không có public IP được assign.
-<!-- EDIT: Đổi subnet ID và CIDR thật -->
+
+
+**Notes:** Instance `database-ecommerce` nằm trong subnet group: db_subnet . Route table của subnet không có route `0.0.0.0/0 → igw-*`, chỉ có local route. Vì để bảo mật nên chỉ để db ở tầng private subnet, chỉ cho phép truy cập từ application
 
 ---
 
@@ -91,8 +89,9 @@ Pattern #3 (atomic checkout) trên **key-value engine (DynamoDB)** sẽ cần `T
 
 - [x] Encryption at rest **enabled**
 
-![Encryption at rest](./screenshots/s3-db-encryption.png)
-<!-- EDIT: Chụp màn hình RDS console → tab Configuration → Storage encrypted: Yes -->
+![encrypt at rest](https://hackmd.io/_uploads/SJ2sHBOaZl.jpg)
+
+
 
 **Notes:** Storage encryption bật với AWS-managed key `aws/rds`. Chọn AWS-managed thay vì customer CMK vì chưa có compliance mandate về key rotation manual và muốn AWS tự rotate hàng năm.
 <!-- EDIT: Đổi nếu dùng customer CMK hoặc engine khác -->
@@ -103,10 +102,12 @@ Pattern #3 (atomic checkout) trên **key-value engine (DynamoDB)** sẽ cần `T
 
 - [x] **Multi-AZ enabled** (managed engine) <!-- EDIT: hoặc đổi thành replica plan / SPOF acknowledged nếu self-hosted -->
 
-![Multi-AZ](./screenshots/s3-db-multiaz.png)
+![Multi-AZ](https://hackmd.io/_uploads/S19_WrOabe.jpg)
+
+
 <!-- EDIT: Chụp RDS console → tab Configuration → Multi-AZ: Yes -->
 
-**Notes:** Multi-AZ enabled — synchronous standby ở `ap-southeast-1b`, primary ở `ap-southeast-1a`. Failover tự động ~60-120 giây, AWS flip CNAME endpoint, không cần thay đổi connection string ở app.
+**Notes:** Multi-AZ enabled — synchronous standby ở `us-west-2a`, primary ở `us-west-2a`. Vì lý do để cải thiện High Avaiability, khi AC us-west-2a sập thì chúng ta vẫn còn dự phòng ở us-west-2b
 <!-- EDIT: Đổi AZ thật -->
 
 ---
@@ -115,42 +116,30 @@ Pattern #3 (atomic checkout) trên **key-value engine (DynamoDB)** sẽ cần `T
 
 - [x] Ít nhất **1 record được write và read** qua application hoặc CLI
 
-![Record write/read](./screenshots/s3-db-record-rw.png)
-<!-- EDIT: Chụp terminal psql hoặc app output cho thấy INSERT + SELECT -->
+![image](https://hackmd.io/_uploads/Hy9k0zOT-e.png)
 
-**Notes:** Insert 1 row vào bảng `orders` qua `psql` CLI, sau đó `SELECT` lại để verify row tồn tại với đúng giá trị. Command:
+**Notes:**  
+Insert 1 row vào bảng `PRODUCT` thông qua `sqlcmd` CLI từ EC2, sau đó thực hiện truy vấn `SELECT` theo khóa chính (`ProductID`) để xác minh dữ liệu đã được ghi thành công và trả về đúng giá trị. Đây là một ví dụ của **indexed lookup** trong relational database.
+
 ```sql
-INSERT INTO orders (order_id, user_id, total, created_at)
-VALUES ('ord-001', 'usr-001', 149000, NOW());
+INSERT INTO dbo.PRODUCT (ProductID, Name, Brand, Description, ImageURL)
+VALUES (100, 'Demo Product', 'Demo Brand', 'Inserted from EC2 using sqlcmd', 'https://example.com/demo-product.png');
 
-SELECT * FROM orders WHERE order_id = 'ord-001';
+SELECT ProductID, Name, Brand, Description, ImageURL
+FROM dbo.PRODUCT
+WHERE ProductID = 100;
 ```
-<!-- EDIT: Đổi bảng/cột/data cho đúng schema thật -->
-
----
 
 ### 3.2 Database — Paradigm Specific
-
-> **Nếu chọn Relational (RDS / Aurora / self-hosted SQL):** điền section này.
-> **Nếu chọn Key-Value (DynamoDB):** xóa section này, dùng section 3.2-KV bên dưới.
-> **Nếu chọn Document (DocumentDB / MongoDB):** dùng section 3.2-DOC.
-> **Nếu chọn Graph (Neptune):** dùng section 3.2-GRAPH.
 
 #### [Relational] Schema — ≥2 Related Tables với Foreign Key
 
 - [x] Schema có **ít nhất 2 bảng có quan hệ** với foreign key constraint
 
-![Schema FK](./screenshots/s3-schema-fk.png)
-<!-- EDIT: Chụp psql \d orders và \d order_items, hoặc schema diagram -->
+![image](https://hackmd.io/_uploads/S1_2vBu6Zl.png)
 
-**Notes:** Bảng `orders` (`order_id` PK) và `order_items` (`item_id` PK, `order_id` FK). Constraint:
-```sql
-ALTER TABLE order_items
-  ADD CONSTRAINT fk_order_items_order
-  FOREIGN KEY (order_id) REFERENCES orders(order_id) ON DELETE CASCADE;
-```
-`ON DELETE CASCADE` đảm bảo khi order bị xóa, các item liên quan cũng bị xóa — tránh orphan rows.
-<!-- EDIT: Đổi tên bảng/cột thật -->
+
+**Notes:** Bảng `order` (`order_id` PK) và `order_item` (`OrderitemId` PK, `order_id` FK). Để tránh dư thừa dữ liệu và đảm bảo tính toàn vẹn.
 
 ---
 
@@ -158,391 +147,473 @@ ALTER TABLE order_items
 
 - [x] Có **index hỗ trợ WHERE / JOIN** cho access pattern phổ biến
 
-![Index](./screenshots/s3-index-lookup.png)
-<!-- EDIT: Chụp EXPLAIN ANALYZE output xác nhận Index Scan -->
 
-**Notes:** Index `idx_orders_user_id` trên `orders(user_id)`:
+| Table | Index | Type | Columns | PK | Unique |
+|---|---|---|---|:---:|:---:|
+| ORDER | idx_order_user_date | NONCLUSTERED | UserID, OrderDateTime | — | — |
+| ORDER | PK__ORDER__C3905BAF… | CLUSTERED | OrderID | ✓ | ✓ |
+| ORDER_ITEM | idx_order_item_order_id | NONCLUSTERED | OrderID | — | — |
+| ORDER_ITEM | PK__ORDER_IT__57ED06A1… | CLUSTERED | OrderItemID | ✓ | ✓ |
+| PRODUCT | PK__PRODUCT__B40CC6ED… | CLUSTERED | ProductID | ✓ | ✓ |
+| PRODUCT_SIZE | PK__PRODUCT___9DADF571… | CLUSTERED | ProductSizeID | ✓ | ✓ |
+| USER | PK__USER__1788CCAC… | CLUSTERED | UserID | ✓ | ✓ |
+
+**Notes:**  
+Dùng index `idx_order_user_date` để filter theo `UserID` và sort `OrderDateTime DESC`, và `idx_order_item_order_id` để tối ưu JOIN theo `OrderID`.
 ```sql
-CREATE INDEX idx_orders_user_id ON orders(user_id);
-EXPLAIN ANALYZE SELECT * FROM orders WHERE user_id = 'usr-001';
--- Output: Index Scan using idx_orders_user_id on orders  (cost=0.28..8.30 rows=3 ...)
+CREATE NONCLUSTERED INDEX idx_order_user_date
+    ON [ORDER](UserID ASC, OrderDateTime DESC);
+    
+CREATE NONCLUSTERED INDEX idx_order_item_order_id
+    ON [ORDER_ITEM](OrderID ASC);
 ```
-Không có Seq Scan.
-<!-- EDIT: Đổi index name, column, EXPLAIN output thật -->
-
 ---
 
 #### [Relational] Automated Backups — 7+ ngày retention
 
 - [x] Automated backups configured với **retention ≥7 ngày**
 
-![Backup config](./screenshots/s3-backup-config.png)
+![Backup config](https://hackmd.io/_uploads/Hyi6Mrda-e.jpg)
+
 <!-- EDIT: Chụp RDS console → Maintenance & backups → Automated backups: 7 days -->
 
-**Notes:** Automated backup retention 7 ngày. Backup window: 03:00-04:00 UTC (low-traffic). Point-in-time restore available cho bất kỳ giây nào trong 7 ngày qua.
-<!-- EDIT: Đổi backup window và retention thật -->
+**Notes:** Automated backup retention 7 ngày. Backup window: 18:00-20:00 UTC (low-traffic) vì để giảm thiểu ảnh hưởng hiệu năng
 
----
 
-<!-- 3.2-KV: Uncomment section này nếu chọn DynamoDB
-
-### 3.2-KV Database — Key-Value (DynamoDB)
-
-#### High-Cardinality Partition Key
-
-- [ ] Partition key là **high-cardinality** (user_id, order_id, device_id — KHÔNG phải status, active)
-
-![Partition key](./screenshots/s3-ddb-partition-key.png)
-
-**Notes:** Table `xbrain-orders`: PK = `user_id` (String) + SK = `order_id` (String).
-`user_id` có cardinality cao (1 value per user — hàng triệu users), tránh hot partition.
-
-#### Capacity Mode
-
-- [ ] On-demand HOẶC Provisioned với **auto scaling enabled**
-
-![Capacity mode](./screenshots/s3-ddb-capacity.png)
-
-**Notes:** Chọn On-demand — tự scale theo traffic thực tế, không cần estimate capacity trước. Phù hợp với traffic pattern không đều của W3.
-
-#### Query + GSI (không Scan)
-
-- [ ] Primary access qua **Query** theo partition key
-- [ ] Có **ít nhất 1 GSI** cho access pattern thứ 2
-
-![Query + GSI](./screenshots/s3-ddb-query-gsi.png)
-
-**Notes:** GSI `gsi-status-created` (PK=`status`, SK=`created_at`) phục vụ query "lấy tất cả orders có status=PENDING mới nhất". Không dùng Scan.
-
--->
-
----
-
-<!-- 3.2-DOC: Uncomment section này nếu chọn DocumentDB / MongoDB
-
-### 3.2-DOC Database — Document (DocumentDB / self-hosted MongoDB)
-
-#### Aggregation Pipeline
-
-- [ ] Có **1 aggregation pipeline** trả về kết quả shaped/grouped
-
-![Aggregation](./screenshots/s3-doc-aggregation.png)
-
-**Notes:** Pipeline tính tổng doanh thu theo category:
-```js
-db.orders.aggregate([
-  { $match: { status: "COMPLETED" } },
-  { $group: { _id: "$category", totalRevenue: { $sum: "$amount" } } },
-  { $sort: { totalRevenue: -1 } }
-])
-```
-
-#### Indexed Field Lookup
-
-- [ ] **Secondary index** trên field thường xuyên query
-
-![Index](./screenshots/s3-doc-index.png)
-
-**Notes:** Index trên `user_id` để `find({ user_id: "usr-001" })` dùng IXSCAN, không COLLSCAN.
-`db.orders.explain("executionStats").find({ user_id: "usr-001" })` xác nhận `winningPlan.stage: IXSCAN`.
-
--->
-
----
-
-### 3.3 Bedrock Knowledge Base
-
-- [x] Knowledge Base **tạo xong** và **connect với S3 bucket từ W2**
-
-![KB created](./screenshots/s3-kb-created.png)
-<!-- EDIT: Chụp Bedrock console → Knowledge Bases → Status: Active -->
-
-**Notes:** KB `xbrain-knowledge-base` connect tới bucket `xbrain-docs-w2` (bucket từ W2, Block Public Access ON, versioning ON). Không tạo bucket mới.
-<!-- EDIT: Đổi tên KB và bucket thật -->
-
----
-
-- [x] **≥3 documents ingested**, sync job status: **Complete**
-
-![Sync complete](./screenshots/s3-kb-sync.png)
-<!-- EDIT: Chụp Bedrock console → KB → Data sources → Last sync: Complete + document count -->
-
-**Notes:** Sync job hoàn thành lúc `2026-04-22 09:14 UTC`. 3 documents ingested: `policy.pdf`, `product-catalog.pdf`, `faq.md`.
-<!-- EDIT: Đổi tên file và timestamp thật -->
-
----
-
-- [x] **Embedding model:** Amazon Titan Embeddings G1 - Text <!-- EDIT: đổi nếu dùng model khác -->
-- [x] **Vector store:** OpenSearch Serverless <!-- EDIT: đổi nếu dùng Aurora PostgreSQL hoặc S3 Vectors -->
-
-![KB config](./screenshots/s3-kb-config.png)
-<!-- EDIT: Chụp KB detail page showing embedding model + vector store -->
-
-**Notes:** Chọn Titan Embeddings G1 - Text vì nằm trong free tier / low cost cho W3. OpenSearch Serverless là default vector store của Bedrock KB — không cần provision cluster riêng.
-<!-- EDIT: Điều chỉnh reasoning cho đúng lý do thật -->
-
----
-
-- [x] **1 Retrieve / RetrieveAndGenerate API call** từ Lambda hoặc CLI (không phải Playground)
-
-![API call evidence](./screenshots/s3-kb-api-call.png)
-<!-- EDIT: Chụp CloudWatch log hoặc terminal output của CLI call -->
-
-**Notes:** Xem Section 5 — Lambda + Bedrock Evidence cho CloudWatch log và JSON response đầy đủ.
-
----
-
-### 3.4 Lambda Function
-
-- [x] Execution role **không có** `Action: "*"` hay `Resource: "*"`
-
-![Lambda role policy](./screenshots/s3-lambda-role.png)
-<!-- EDIT: Chụp IAM console → Role → Policy JSON, highlight các Action + Resource cụ thể -->
-
-**Notes:** Role `xbrain-lambda-role` policy:
-```json
-{
-  "Version": "2012-10-17",
-  "Statement": [
-    {
-      "Effect": "Allow",
-      "Action": ["bedrock:RetrieveAndGenerate", "bedrock:Retrieve"],
-      "Resource": "arn:aws:bedrock:ap-southeast-1::knowledge-base/KBID123"
-    },
-    {
-      "Effect": "Allow",
-      "Action": ["s3:GetObject"],
-      "Resource": "arn:aws:s3:::xbrain-docs-w2/*"
-    },
-    {
-      "Effect": "Allow",
-      "Action": ["logs:CreateLogGroup", "logs:CreateLogStream", "logs:PutLogEvents"],
-      "Resource": "arn:aws:logs:ap-southeast-1:123456789012:log-group:/aws/lambda/xbrain-retriever:*"
-    }
-  ]
-}
-```
-Không có wildcard action hoặc resource.
-<!-- EDIT: Đổi KBID, bucket name, account ID, function name thật -->
-
----
-
-- [x] **Trigger** demo live: S3 event trigger <!-- EDIT: đổi thành "API Gateway integration" nếu dùng API GW -->
-
-![Lambda trigger](./screenshots/s3-lambda-trigger.png)
-<!-- EDIT: Chụp Lambda console → Configuration → Triggers -->
-
-**Notes:** S3 trigger: bucket `xbrain-docs-w2`, event type `s3:ObjectCreated:*`, prefix `docs/`. Mỗi khi file được upload vào `docs/`, Lambda `xbrain-retriever` được invoke tự động (asynchronous invocation).
-<!-- EDIT: Đổi bucket, prefix, function name thật -->
-
----
-
-- [x] **Function output** visible trong CloudWatch Logs
-
-![CloudWatch output](./screenshots/s3-lambda-cw.png)
-<!-- EDIT: Chụp CloudWatch Logs → Log group → Log stream với ít nhất 1 log entry có timestamp -->
-
-**Notes:** Xem Section 5 — Lambda + Bedrock Evidence cho log entry đầy đủ với timestamp.
-
----
-
-### 3.5 VPC & Networking
+### 3.3 VPC & Networking
 
 - [x] VPC diagram show **3 tiers có label**: Public / Private Application / Private Database
 
-![VPC diagram](./screenshots/s3-vpc-diagram.png)
-<!-- EDIT: Paste diagram đã update từ W2, có đủ 3 tiers và S3 Gateway Endpoint -->
+![image](https://hackmd.io/_uploads/BJTd3rdTZg.png)
+
+
 
 ---
 
 - [x] **S3 Gateway Endpoint** provision và labeled trên diagram (với route table entry)
 
-![S3 Endpoint route table](./screenshots/s3-vpc-s3endpoint.png)
-<!-- EDIT: Chụp VPC console → Route Tables → Route table của private subnet, có entry: pl-XXXXX → vpce-XXXXX -->
+![image](https://hackmd.io/_uploads/BytM1UDpZx.png)
 
-**Notes:** VPC Gateway Endpoint `vpce-0abc123` cho S3. Route table `rtb-private-app` có entry `pl-60b54009 (com.amazonaws.ap-southeast-1.s3) → vpce-0abc123`. S3 traffic từ private subnet không đi qua NAT Gateway — tiết kiệm cost và ở lại trong AWS backbone.
+
+**Notes:** VPC Gateway Endpoint `vpce-0945ef943cecc4994` cho S3. Route table `rtb-051e518c8e9856fb5` có entry `pl-68a54001 (com.amazonaws.us-west-2.s3) → vpce-0945ef943cecc4994`. S3 traffic từ private subnet sẽ đi qua VPC Gateway EndPoint mà không đi qua NAT Gateway, giúp tiết kiệm cost.
 <!-- EDIT: Đổi vpce ID, rtb ID, prefix list ID thật -->
 
 ---
 
 - [x] Database Security Group inbound rule source = **App-tier Security Group ID** (không phải CIDR)
 
-![DB SG inbound rule](./screenshots/s3-db-sg-inbound.png)
-<!-- EDIT: Chụp EC2 console → Security Groups → DB SG → Inbound rules: Source = sg-XXXXX -->
+![image](https://hackmd.io/_uploads/Hk-08vvaZl.png)
 
-**Notes:** DB SG `sg-db-xbrain` inbound rule: Port 5432 (PostgreSQL), Source = `sg-app-xbrain` (app tier SG ID). Không dùng CIDR `10.0.2.0/24` vì SG ID là identity-based — đúng instance trong app tier mới được access, kể cả khi subnet CIDR thay đổi.
+
+
+**Notes:** DB SG `sg-05fcb3d245482d04a` (db tier SG ID) inbound rule: Port 1433 (SQLServer), Source = `sg-09ea139c58a3e1c16` (app tier SG ID).
 <!-- EDIT: Đổi SG IDs thật -->
 
 ---
 
-- [x] Có thể giải thích 1 scenario khi dùng **NACL thay vì Security Group**
 
-**Scenario:** Cần **block hoàn toàn** một dải IP bên ngoài (`203.0.113.0/24`) đang scan port 22 trên toàn subnet. Security Group chỉ có Allow rules — không thể explicit Deny. NACL có cả Allow và Deny rules, áp dụng cho toàn bộ subnet, nên có thể thêm Deny rule cho `203.0.113.0/24` ở priority cao hơn. Lưu ý: NACL stateless — phải explicit allow cả outbound return traffic trên ephemeral ports 1024-65535.
-<!-- EDIT: Thay IP ví dụ, có thể dùng scenario khác phù hợp hơn với setup của nhóm -->
+**Security Group over NACL:** Ưu tiên sử dụng Security Group vì tính chất Stateful, tự động cho phép luồng dữ liệu phản hồi mà không cần mở thủ công các cổng ephemeral ports như NACL (Stateless), giúp giảm thiểu sai sót cấu hình. Quan trọng hơn, SG cho phép quản lý bảo mật theo Security Group ID (như việc chỉ cho phép sg-app truy cập DB), giúp thực thi nguyên tắc Least Privilege linh hoạt theo thực thể thay vì bị bó hẹp trong dải IP cố định của Subnet như NACL. Với cơ chế mặc định 'Cấm tất cả', SG là chốt chặn an toàn nhất để vượt qua các bài kiểm tra truy cập trái phép (Negative Security Test).
 
 ---
 
 ## Section 4 — Working Query Evidence
 
-> **2 operations match với paradigm đã chọn.** Mỗi operation: command thật + screenshot output thật + ghi chú index/mechanism.
-> Template mặc định: Relational. Xóa/thay nếu chọn paradigm khác.
 
 ### Operation 1 — JOIN Query (Relational)
 
-**Mô tả:** Lấy tất cả order items của `user_id = 'usr-001'`, JOIN qua 2 bảng `orders` và `order_items`.
+**Mô tả:** Lấy danh sách tất cả các order items của người dùng có UserID = 1, bằng cách JOIN giữa hai bảng dbo.[ORDER] và dbo.ORDER_ITEM thông qua khóa OrderID, và sắp xếp kết quả theo thời gian đặt hàng giảm dần.
 
 ```sql
--- EDIT: Đổi user_id và tên bảng/cột cho đúng schema thật
 SELECT
-    o.order_id,
-    o.created_at,
-    o.total,
-    oi.product_id,
-    oi.quantity,
-    oi.unit_price
-FROM orders o
-JOIN order_items oi ON o.order_id = oi.order_id
-WHERE o.user_id = 'usr-001'
-ORDER BY o.created_at DESC;
+    o.OrderID,
+    o.OrderDateTime,
+    o.TotalPrice,
+    o.OrderStatus,
+    oi.OrderItemID,
+    oi.Quantity,
+    oi.ProductSizeID
+FROM dbo.[ORDER] o
+JOIN dbo.ORDER_ITEM oi ON o.OrderID = oi.OrderID
+WHERE o.UserID = 1
+ORDER BY o.OrderDateTime DESC, oi.OrderItemID ASC;
 ```
+![image](https://hackmd.io/_uploads/r14xKBdTbg.png)
 
-![JOIN query result](./screenshots/s4-join-query.png)
-<!-- EDIT: Chụp terminal/console với output rows thật, không phải empty result -->
 
-**Notes:** Query dùng `idx_orders_user_id` (Index Scan trên `orders`) + Nested Loop Join với `order_items`. `EXPLAIN ANALYZE` output ở screenshot xác nhận không có Seq Scan. Execution time thực tế: ~3ms với dataset nhỏ của W3.
-<!-- EDIT: Đổi execution time thật từ EXPLAIN ANALYZE -->
+## Section 5 — Bedrock
+### 5.1 Create knowledge file for Bedrock 
+ Tạo **3 documents** làm dữ liệu đầu vào cho Knowledge Base:
+- `product_faq.txt`
+- `return_refund_policy.txt`
+- `shipping_policy.txt`
+![image](https://hackmd.io/_uploads/S1684wva-e.png)
+
+
+### 5.2 Create S3 bucket for knowledge base
+
+- Truy cập AWS Console → S3 → Create bucket  
+- Đặt tên bucket: `group3-kbai` (đảm bảo unique)  
+- Chọn region: ap-southeast-1   
+- Giữ cấu hình mặc định  
+![Ảnh chụp màn hình 2026-04-23 154527](https://hackmd.io/_uploads/Sk3XXvDpbx.png)
+---
+
+- Cấu hình bảo mật và encryption 
+![Ảnh chụp màn hình 2026-04-23 154606](https://hackmd.io/_uploads/SJn7QvvTWe.png)
+**Notes:**  
+- Block Public Access: ON  
+- Object Ownership: ACLs disabled  
+- Default encryption: SSE-S3 (mặc định)
+
+![Ảnh chụp màn hình 2026-04-23 154624](https://hackmd.io/_uploads/HkTNQPD6Zg.png)
+
+**Files uploaded:**
+- `product_faq.txt`
+- `return_refund_policy.txt`
+- `shipping_policy.txt`
+![image](https://hackmd.io/_uploads/SkKlD5v6Wl.png)
+
+- [x] Bucket sẵn sàng làm data source cho Knowledge Base
 
 ---
 
-### Operation 2 — Indexed Lookup (Relational)
+### 5.3 Create bedrock knowledge base  
 
-**Mô tả:** Lookup product detail theo `product_id` — access pattern phổ biến nhất (~200 calls/phút).
+#### 5.3.1 Tạo Knowledge Base  
 
-```sql
--- EDIT: Đổi product_id và tên bảng thật
-EXPLAIN ANALYZE
-SELECT product_id, name, price, stock_quantity
-FROM products
-WHERE product_id = 'prod-042';
-```
+- Vào **Amazon Bedrock**  
+- Chọn **Knowledge Bases** → **Create knowledge base**  
 
-![Indexed lookup + EXPLAIN](./screenshots/s4-indexed-lookup.png)
-<!-- EDIT: Chụp terminal với EXPLAIN ANALYZE output + rows returned -->
+Thông tin cơ bản:
+- Name: `group3-aikb`  
+- Description: `Dữ liệu được phân tách theo từng nhóm nội dung, hỗ trợ truy vấn chính xác và phục vụ pipeline retrieve–generate`
+  
+  
+![Ảnh chụp màn hình 2026-04-23 154710](https://hackmd.io/_uploads/S1DZEPwp-e.png)
 
-**Notes:** PK lookup trên `products.product_id` (B-tree index). `EXPLAIN ANALYZE` output: `Index Scan using products_pkey on products (cost=0.28..8.30 rows=1 ...) (actual time=0.041..0.042 rows=1 ...)`. Execution time <1ms — expected cho single-row PK lookup.
-<!-- EDIT: Đổi EXPLAIN output thật -->
+#### 5.3.2 Cấu hình Data Source (S3)  
+
+- **Source name:** `S3Source`  
+- **S3 URI:** chọn bucket `group3-ai` (Browse S3)  
+
+![Ảnh chụp màn hình 2026-04-23 154732](https://hackmd.io/_uploads/HkPbVPvTWx.png)
+![Ảnh chụp màn hình 2026-04-23 154750](https://hackmd.io/_uploads/SJvWNDvTZx.png)
+---
+#### 5.3.3 Chọn Embedding Model  
+- Sử dụng **Cohere Embedding Model** (multilingual hoặc tương đương)  
+---
+#### 5.3.4 Cấu hình Vector Store  
+- Chọn:  
+  - **Quick create a new vector store**  
+  - Loại: **S3 vector store**  
+
+![Ảnh chụp màn hình 2026-04-23 154808](https://hackmd.io/_uploads/SJv-NvPpWg.png)
+---
+#### 5.3.5 Tạo Knowledge Base  
+
+- Kiểm tra lại toàn bộ cấu hình  
+- Nhấn **Create knowledge base**  
 
 ---
 
-<!-- Uncomment nếu chọn Key-Value (DynamoDB)
+#### 5.3.6 Đồng bộ dữ liệu (bắt buộc)  
 
-### Operation 1 — Query theo Partition Key (Key-Value)
+- Trong mục **Data source**  
+- Nhấn **Sync**  
+- Đợi trạng thái: `Complete`  
+![Ảnh chụp màn hình 2026-04-23 154850](https://hackmd.io/_uploads/HyK_2HOp-x.png)
+![Ảnh chụp màn hình 2026-04-23 154901](https://hackmd.io/_uploads/Sk5uhBdT-x.png)
 
-**Mô tả:** Lấy tất cả orders của `user_id = 'usr-001'`, sort theo `created_at` mới nhất.
+---
 
-```python
-# EDIT: Đổi table name, key values
+#### 5.3.7 Lưu thông tin quan trọng  
+
+Sau khi hoàn tất, lưu lại:  
+
+- **Knowledge Base ID** (phần Overview)  
+- **Data Source ID** (bảng Data source phía dưới)  
+
+---
+
+**Ghi chú**  
+
+- Nếu chưa **Sync** → hệ thống chưa index dữ liệu → truy vấn sẽ không có kết quả  
+- Embedding model ảnh hưởng đến chất lượng tìm kiếm  
+- S3 vector store phù hợp cho demo (triển khai nhanh, đơn giản)  
+---
+### 5.4 Create lambda funtion
+Triển khai Lambda Function (Chatbot Orchestrator)
+
+---
+![Ảnh chụp màn hình 2026-04-24 085533](https://hackmd.io/_uploads/BkQhTSO6Zl.png)
+
+**1. Tạo Lambda Function**
+
+- Truy cập **AWS Lambda**
+- Chọn **Create function**
+
+**Cấu hình:**
+- Function name: `Chatbot_Orchestrator`
+- Runtime: `Python 3.12`
+
+→ Nhấn **Create function**
+
+
+**2. Cập nhật Code**
+
+- Xóa toàn bộ code mặc định
+- Dán đoạn code vào:
+```
 import boto3
-dynamodb = boto3.client('dynamodb', region_name='ap-southeast-1')
+import json
+import logging
 
-response = dynamodb.query(
-    TableName='xbrain-orders',
-    KeyConditionExpression='user_id = :uid AND created_at > :since',
-    ExpressionAttributeValues={
-        ':uid': {'S': 'usr-001'},
-        ':since': {'S': '2026-04-01T00:00:00Z'}
-    },
-    ScanIndexForward=False  # DESC order
-)
-print(f"Items returned: {len(response['Items'])}")
-print(f"Scanned count: {response['ScannedCount']}")  # phải bằng Count nếu không Scan
+
+# Cấu hình logging chuẩn của AWS
+logger = logging.getLogger()
+logger.setLevel(logging.INFO)
+
+
+REGION = 'ap-southeast-1'
+bedrock_agent = boto3.client('bedrock-agent', region_name=REGION)
+bedrock_runtime = boto3.client('bedrock-agent-runtime', region_name=REGION)
+
+
+def lambda_handler(event, context):
+   
+    kb_id = 'IZAUMZEQYU'
+    ds_id = 'STHKG4IJSR'
+   
+    # 1. Xử lý S3 Sync (Trigger từ S3)
+    if 'Records' in event and event['Records'][0].get('eventSource') == 'aws:s3':
+        bucket = event['Records'][0]['s3']['bucket']['name']
+        file_name = event['Records'][0]['s3']['object']['key']
+        logger.info(f"Phát hiện file mới: {file_name} tại bucket: {bucket}. Đang bắt đầu Sync...")
+       
+        try:
+            response = bedrock_agent.start_ingestion_job(knowledgeBaseId=kb_id, dataSourceId=ds_id)
+            logger.info(f"Sync đã kích hoạt thành công. Job ID: {response['ingestionJob']['ingestionJobId']}")
+            return {'statusCode': 200, 'body': 'Auto-Sync Started'}
+        except Exception as e:
+            logger.error(f"Lỗi khi Sync: {str(e)}")
+            return {'statusCode': 500, 'body': str(e)}
+
+
+    # 2. Xử lý Chat (Gọi từ Backend/Test)
+    else:
+        body = event.get('body', event)
+        if isinstance(body, str): body = json.loads(body)
+        user_query = body.get('question')
+       
+        if not user_query:
+            logger.warning("Request không có câu hỏi (question)")
+            return {'statusCode': 400, 'body': 'Thiếu câu hỏi trong JSON'}
+
+
+        logger.info(f"Đang hỏi Bedrock câu: {user_query}")
+
+
+        try:
+            model_arn = f'arn:aws:bedrock:{REGION}::foundation-model/anthropic.claude-3-haiku-20240307-v1:0'
+
+
+            response = bedrock_runtime.retrieve_and_generate(
+                input={'text': user_query},
+                retrieveAndGenerateConfiguration={
+                    'type': 'KNOWLEDGE_BASE',
+                    'knowledgeBaseConfiguration': {
+                        'knowledgeBaseId': kb_id,
+                        'modelArn': model_arn
+                    }
+                }
+            )
+           
+            logger.info("Bedrock đã phản hồi thành công.")
+            return {
+                'statusCode': 200,
+                'headers': {'Content-Type': 'application/json'},
+                'body': json.dumps({
+                    'answer': response['output']['text'],
+                    'evidence': 'Bedrock Knowledge Base'
+                }, ensure_ascii=False)
+            }
+        except Exception as e:
+            logger.error(f"Lỗi khi gọi Bedrock: {str(e)}")
+            return {'statusCode': 500, 'body': f"Lỗi hệ thống: {str(e)}"}
 ```
 
-![DDB Query result](./screenshots/s4-ddb-query.png)
+**3. Cấu hình ID quan trọng**
 
-**Notes:** Dùng `Query` (không phải `Scan`). `ScannedCount == Count` xác nhận chỉ đọc items cần thiết — không full-table scan. Partition key `user_id` high-cardinality.
+Trong code, thay thế:
 
-### Operation 2 — GSI Query (Key-Value)
+- `YOUR_KB_ID` → bằng **Knowledge Base ID**
+- `YOUR_DATA_SOURCE_ID` → bằng **Data Source ID**
 
-**Mô tả:** Lấy tất cả orders có `status = 'PENDING'` mới nhất qua GSI.
+*(2 giá trị này lấy từ bước tạo Knowledge Base)*
 
-```python
-response = dynamodb.query(
-    TableName='xbrain-orders',
-    IndexName='gsi-status-created',
-    KeyConditionExpression='#s = :status',
-    ExpressionAttributeNames={'#s': 'status'},
-    ExpressionAttributeValues={':status': {'S': 'PENDING'}},
-    ScanIndexForward=False
-)
-```
+**4. Deploy**
 
-![GSI Query](./screenshots/s4-ddb-gsi.png)
+- Nhấn **Deploy** để lưu và kích hoạt function
 
-**Notes:** GSI `gsi-status-created` (PK=`status`, SK=`created_at`). Không Scan — GSI Query targeted.
 
--->
+**Ghi chú**
+
+- Đảm bảo Lambda đã được gán:
+  - `Chatbot_Production_Policy` (IAM)
+- Nếu sai ID:
+  - Query sẽ không trả về dữ liệu
+- Nếu chưa Sync Knowledge Base:
+  - RAG sẽ không hoạt động
+
+---
+![Ảnh chụp màn hình 2026-04-23 154936](https://hackmd.io/_uploads/BkCuEPvpbl.png)
+
 
 ---
 
-## Section 5 — Lambda + Bedrock Evidence
+### 5.5 Attache policy for lambda
+#### Hướng dẫn tạo IAM Policy cho Chatbot (Bedrock + S3 + Lambda)
 
-### Lambda CloudWatch Logs
-
-![CloudWatch Logs](./screenshots/s5-cloudwatch-log.png)
-<!-- EDIT: Chụp CloudWatch Log Group /aws/lambda/xbrain-retriever → Log stream với timestamp sau khi trigger -->
-
-**Log entry thật (copy từ CloudWatch, đổi bằng output thật của nhóm):**
-<!-- EDIT: Xóa example bên dưới và paste log thật -->
-```
-START RequestId: a1b2c3d4-e5f6-7890-abcd-ef1234567890 Version: $LATEST
-2026-04-22T08:14:33.412Z  a1b2c3d4  INFO  S3 trigger: xbrain-docs-w2/docs/product-catalog.pdf
-2026-04-22T08:14:33.891Z  a1b2c3d4  INFO  Invoking Bedrock RetrieveAndGenerate...
-2026-04-22T08:14:35.102Z  a1b2c3d4  INFO  Response received. Citations: 2. Answer: 312 chars.
-END RequestId: a1b2c3d4-e5f6-7890-abcd-ef1234567890
-REPORT RequestId: a1b2c3d4  Duration: 1691.23 ms  Billed Duration: 1700 ms  Memory Size: 128 MB  Max Memory Used: 67 MB
-```
-
-**Notes:** Timestamp `2026-04-22T08:14:33.412Z` là sau khi upload file lên S3 lúc 08:14:30 UTC. Latency trigger → invocation: ~3 giây (async S3 trigger). Billed duration 1700ms chủ yếu là Bedrock API call (~1.5s).
-<!-- EDIT: Đổi timestamp, file name, latency thật -->
+Thực hiện tại: **IAM > Policies > Create Policy (Visual Editor)**
 
 ---
 
-### Bedrock RetrieveAndGenerate Response
+#### Bước 1: Quyền cho Bedrock Knowledge Base
 
-**Gọi từ Lambda (không phải Bedrock Playground).** Output thật từ `boto3` trong Lambda function:
+- **Service:** Bedrock  
+- **Actions:**
+  - Retrieve  
+  - RetrieveAndGenerate  
+  - StartIngestionJob  
+
+- **Resources:** Specific  
+  - knowledge-base → Add ARNs:
+    - Region: `ap-southeast-1`
+    - Account: `032265101228`
+    - Knowledge base ID: `IZAUMZEQYU`
+
+---
+
+#### Bước 2: Quyền gọi Model (InvokeModel)
+
+- **Add more permissions**
+- **Service:** Bedrock  
+- **Actions:**
+  - InvokeModel  
+
+- **Resources:** Specific  
+  - foundation-model → Add ARNs:
+    - Region: `ap-southeast-1` *(hoặc để trống)*
+    - Model ID: `anthropic.claude-3-haiku-20240307-v1:0`
+
+---
+
+#### Bước 3: Quyền S3 (Lưu trữ)
+
+- **Add more permissions**
+- **Service:** S3  
+- **Actions:**
+  - GetObject  
+  - ListBucket  
+
+- **Resources:** Specific  
+
+  **Bucket:**
+  - Bucket name: `toan-chatbot-data-2026`
+
+  **Object:**
+  - Bucket name: `toan-chatbot-data-2026`
+  - Object name: `*`
+
+---
+
+#### Bước 4: Quyền CloudWatch Logs
+
+- **Add more permissions**
+- **Service:** CloudWatch Logs  
+- **Actions:**
+  - CreateLogGroup  
+  - CreateLogStream  
+  - PutLogEvents  
+
+- **Resources:** Specific  
+
+  **Log Group:**
+  - Region: `ap-southeast-1`
+  - Account: `032265101228`
+  - Log group name: `/aws/lambda/Chatbot_Orchestrator`
+
+  **Log Stream:**
+  - Region: `ap-southeast-1`
+  - Account: `032265101228`
+  - Log group name: `/aws/lambda/Chatbot_Orchestrator`
+  - Log stream name: `*`
+
+---
+
+#### Bước 5: Đặt tên Policy
+
+- **Policy name:** `Chatbot_Production_Policy`  
+- **Description:**  
+![ai1](https://hackmd.io/_uploads/SJSEHDvpbx.png)
+![ai2](https://hackmd.io/_uploads/BJS4SwDaZg.png)
+```
+# IAM Policy (JSON)
 
 ```json
 {
-  "output": {
-    "text": "The return policy allows returns within 30 days of purchase with original receipt. Items must be in original condition. Digital products are non-refundable."
-  },
-  "citations": [
+  "Version": "2012-10-17",
+  "Statement": [
     {
-      "generatedResponsePart": {
-        "textResponsePart": { "span": { "start": 0, "end": 88 } }
-      },
-      "retrievedReferences": [
-        {
-          "content": { "text": "Return policy: 30 days from purchase date..." },
-          "location": {
-            "type": "S3",
-            "s3Location": { "uri": "s3://xbrain-docs-w2/docs/policy.pdf" }
-          }
-        }
+      "Sid": "VisualEditor0",
+      "Effect": "Allow",
+      "Action": [
+        "s3:GetObject",
+        "logs:CreateLogStream",
+        "bedrock:InvokeModel",
+        "s3:ListBucket",
+        "logs:CreateLogGroup",
+        "logs:PutLogEvents",
+        "bedrock:Retrieve"
+      ],
+      "Resource": [
+        "arn:aws:s3:::group3-kb",
+        "arn:aws:s3:::group3-kb/*",
+        "arn:aws:logs:us-west-2:664945433260:log-group:/aws/lambda/group3-kb",
+        "arn:aws:logs:us-west-2:664945433260:log-group:/aws/lambda/group3-kb:log-stream:*",
+        "arn:aws:bedrock:us-west-2:664945433260:knowledge-base/ORLPNINRTA",
+        "arn:aws:bedrock:us-west-2::foundation-model/anthropic.claude-3-haiku-20240307-v1:0"
       ]
+    },
+    {
+      "Sid": "VisualEditor1",
+      "Effect": "Allow",
+      "Action": "bedrock:RetrieveAndGenerate",
+      "Resource": "*"
     }
-  ],
-  "sessionId": "session-abc123"
+  ]
 }
 ```
-<!-- EDIT: Xóa JSON example trên và paste response thật từ Lambda/CLI của nhóm -->
 
-![Bedrock response](./screenshots/s5-bedrock-response.png)
-<!-- EDIT: Chụp terminal/CloudWatch với JSON response thật, hoặc Lambda test output -->
 
-**Notes:** Response trích dẫn `policy.pdf` từ S3 bucket W2 — xác nhận KB đã ingest document đúng. `citations` array có `s3Location` — có thể dùng để trace nguồn câu trả lời cho user. Gọi từ Lambda function, không phải Bedrock Console Playground.
-<!-- EDIT: Đổi document name, bucket thật -->
+
+### 5.6 Config Sync automation when upload S3
+![Ảnh chụp màn hình 2026-04-23 164513](https://hackmd.io/_uploads/B1LF5DPabg.png)
+![Ảnh chụp màn hình 2026-04-23 164523](https://hackmd.io/_uploads/H1lUK9wPabe.png)
+![Ảnh chụp màn hình 2026-04-23 164532](https://hackmd.io/_uploads/SyItqvv6Zg.png)
+![Ảnh chụp màn hình 2026-04-23 164543](https://hackmd.io/_uploads/r1wF9DwTZl.png)
+![Ảnh chụp màn hình 2026-04-23 164553](https://hackmd.io/_uploads/HJvtqDv6bx.png)
+![Ảnh chụp màn hình 2026-04-23 164609](https://hackmd.io/_uploads/BJwF9wvT-x.png)
+
+
+
+
+
+### 5.7 Show evidence
+![Ảnh chụp màn hình 2026-04-23 164742](https://hackmd.io/_uploads/S1ngiPPpWx.png)
+![Ảnh chụp màn hình 2026-04-23 164753](https://hackmd.io/_uploads/By2ejPPpbl.png)
+![Ảnh chụp màn hình 2026-04-23 164800](https://hackmd.io/_uploads/By3esDwa-x.png)
+
 
 ---
 
@@ -550,70 +621,58 @@ REPORT RequestId: a1b2c3d4  Duration: 1691.23 ms  Billed Duration: 1700 ms  Memo
 
 ### Route Table — S3 Gateway Endpoint
 
-![Route table S3 endpoint](./screenshots/s6-route-table-s3-endpoint.png)
-<!-- EDIT: Chụp VPC console → Route Tables → chọn route table của private-app subnet → Routes tab -->
+Config trên console:
+![image](https://hackmd.io/_uploads/r14ZV8PTZl.png)
 
-**Entry trong route table (thay bằng thật):**
+**Entry trong route table:**
 
 | Destination | Target | Status |
 |-------------|--------|--------|
 | 10.0.0.0/16 | local | Active |
-| pl-60b54009 (com.amazonaws.ap-southeast-1.s3) | vpce-0abc123456 | Active |
-| 0.0.0.0/0 | nat-0xyz789 | Active |
+| pl-68a54001 (com.amazonaws.us-west-2.s3) | vpce-0945ef943cecc4994 | Active |
+| 0.0.0.0/0 | nat-1a73daa07eec40863 | Active |
+
 
 <!-- EDIT: Đổi prefix list ID, vpce ID, NAT GW ID thật -->
 
-**Notes:** Entry `pl-60b54009 → vpce-0abc123` là S3 Gateway Endpoint. Traffic từ Lambda/app tier tới S3 đi qua VPC endpoint, không qua NAT Gateway — không tốn per-GB NAT processing fee (~$0.045/GB), và ở lại trong AWS backbone (không ra internet).
+**Notes:** Entry `pl-68a54001 → vpce-0945ef943cecc4994` là S3 Gateway Endpoint. Traffic từ Lambda/app tier tới S3 đi qua VPC endpoint, không qua NAT Gateway — không tốn per-GB NAT processing fee (~$0.045/GB), và ở lại trong AWS backbone (không ra internet).
 <!-- EDIT: Điều chỉnh reasoning thật -->
 
 ---
 
 ### DB Security Group Inbound Rules
 
-![DB SG inbound](./screenshots/s6-db-sg-inbound.png)
-<!-- EDIT: Chụp EC2 console → Security Groups → DB SG → Inbound rules tab -->
+Config trên console:
+![image](https://hackmd.io/_uploads/B1bEvvDp-g.png)
 
-**Inbound rules của DB SG `sg-db-xbrain` (thay bằng thật):**
+**Inbound rules của DB SG `sg-db-xbrain`:**
 
 | Type | Protocol | Port | Source | Description |
 |------|----------|------|--------|-------------|
-| PostgreSQL | TCP | 5432 | sg-0app123 (xbrain-app-sg) | App tier access only |
+| SQLServer | TCP | 1433 | sg-09ea139c58a3e1c16 / app  | App tier access only |
 
 <!-- EDIT: Đổi SG ID, port (3306 nếu MySQL), description thật -->
-
-**Notes:** Source là `sg-0app123` (app-tier SG ID) — không phải subnet CIDR `10.0.2.0/24`. Dùng SG ID làm source là identity-based rule: chỉ instances có app-tier SG được access, kể cả khi IP thay đổi. CIDR-based rule sẽ cho phép bất kỳ instance nào trong subnet đó, kể cả bastion hay instance không liên quan.
-<!-- EDIT: Đổi SG IDs thật -->
-
----
-
-### NACL vs Security Group — Khi Nào Dùng NACL
-
-**Scenario:** Phát hiện IP range `203.0.113.0/24` đang scan port 22 trên public subnet. Security Group chỉ có Allow rules — không thể explicit Deny một IP range. Thêm NACL Deny rule cho `203.0.113.0/24` ở priority thấp hơn (số rule nhỏ hơn) để drop traffic trước khi hit SG. NACL stateless — phải thêm cả Deny outbound cho ephemeral ports 1024-65535 từ `203.0.113.0/24` (vì return traffic cũng bị check).
-<!-- EDIT: Thay bằng scenario thật từ architecture của nhóm nếu có -->
 
 ---
 
 ## Section 7 — Negative Security Test
 
-**Kịch bản:** Thử connect trực tiếp tới RDS endpoint từ máy local (ngoài VPC) — không qua bastion, không có VPN.
+**Kịch bản:** Thử connect trực tiếp tới
+
+---
+ RDS endpoint từ máy local (ngoài VPC) — không qua bastion, không có VPN.
 
 ```bash
 # EDIT: Đổi hostname RDS endpoint thật
-psql -h xbrain-db.cluster-xyz.ap-southeast-1.rds.amazonaws.com \
-     -U admin \
-     -d xbraindb \
-     -p 5432
+Test-NetConnection database-ecommerce.clesw26c47c1.us-west-2.rds.amazonaws.com -Port 1433
 
 # Expected output (kết nối bị từ chối / timeout):
-# psql: error: connection to server at "xbrain-db.cluster-xyz..." (10.0.3.45), port 5432 failed:
-# Connection timed out
-#         Is the server running on that host and accepting TCP/IP connections?
 ```
+![image](https://hackmd.io/_uploads/Bk30pPwT-g.png)
 
-![Negative test — connection denied](./screenshots/s7-denied-connection.png)
-<!-- EDIT: Chụp terminal hiện lỗi "Connection timed out" hoặc "Connection refused" -->
 
-**Notes:** DB Security Group `sg-db-xbrain` chỉ có 1 inbound rule: port 5432 từ `sg-app-xbrain` (app-tier SG). Không có rule cho `0.0.0.0/0` hoặc bất kỳ source ngoài app-tier SG. Kết nối từ máy local bị drop silently ở SG level — "Connection timed out" (không phải "Connection refused") vì SG drop packet, không reset connection.
+
+**Notes:** DB Security Group `sg-05fcb3d245482d04a` chỉ có 1 inbound rule: port 1433 từ `sg-09ea139c58a3e1c16` (app-tier SG). Không có rule cho `0.0.0.0/0` hoặc bất kỳ source ngoài app-tier SG. Kết nối từ máy local bị drop silently ở SG level — "Connection timed out" (không phải "Connection refused") vì SG drop packet, không reset connection.
 <!-- EDIT: Đổi SG IDs thật, có thể dùng kịch bản denied khác như unauthorized IAM action -->
 
 ---
@@ -626,61 +685,738 @@ psql -h xbrain-db.cluster-xyz.ap-southeast-1.rds.amazonaws.com \
 
 ### Bonus C — Partial CloudFormation Template (+0.25)
 
-**Scenario:** Viết partial CloudFormation template cho 1 W3 resource, validate syntax.
+**Scenario:** Viết partial CloudFormation template cho việc tạo VPC, Subnet, Route,... .
 
 **Pre-state:** Không có IaC — resource được tạo thủ công qua console.
 
-**Template (`w3-partial.yaml`):**
+**Template (`network.yaml`):**
 ```yaml
-# EDIT: Đổi TableName, AttributeDefinitions, KeySchema cho đúng với DynamoDB table thật
 AWSTemplateFormatVersion: '2010-09-09'
-Description: W3 Partial Template — DynamoDB Table xbrain-orders
+Description: Network Layer
+
+# Parameters: biến đầu vào, có thể truyền khi deploy
+# Nếu không truyền thì dùng Default
+Parameters:
+  VpcCIDR:
+    Type: String
+    Default: 10.1.0.0/16
 
 Resources:
-  XBrainOrdersTable:
-    Type: AWS::DynamoDB::Table
+
+  # ===== VPC =====
+  VPC:
+    Type: AWS::EC2::VPC
     Properties:
-      TableName: xbrain-orders
-      BillingMode: PAY_PER_REQUEST
-      AttributeDefinitions:
-        - AttributeName: user_id
-          AttributeType: S
-        - AttributeName: order_id
-          AttributeType: S
-      KeySchema:
-        - AttributeName: user_id
-          KeyType: HASH
-        - AttributeName: order_id
-          KeyType: RANGE
-      SSESpecification:
-        SSEEnabled: true
+      CidrBlock: !Ref VpcCIDR          # !Ref lấy giá trị từ Parameter VpcCIDR ở trên
+      EnableDnsHostnames: true          # EC2 có hostname dạng ip-10-1-x-x.region.compute.internal
+      EnableDnsSupport: true            # Cho phép DNS resolution trong VPC
       Tags:
-        - Key: Project
-          Value: XBrain-W3
+        - Key: Name
+          Value: HAI-VPC
+
+  # IGW tạo ra độc lập, chưa tự gắn vào VPC
+  IGW:
+    Type: AWS::EC2::InternetGateway
+    Properties:
+      Tags:
+        - Key: Name
+          Value: HAI-IGW
+
+  # Resource riêng để gắn IGW vào VPC
+  # !Ref VPC → tự động lấy ID của resource VPC vừa tạo ở trên
+  AttachIGW:
+    Type: AWS::EC2::VPCGatewayAttachment
+    Properties:
+      VpcId: !Ref VPC
+      InternetGatewayId: !Ref IGW
+
+  # ===== Subnets (2 AZs) =====
+  # !GetAZs "" → trả về list AZ của region hiện tại, ví dụ ["us-west-2a", "us-west-2b", ...]
+  # !Select [0, ...] → lấy phần tử index 0 → AZ đầu tiên (us-west-2a)
+  # !Select [1, ...] → lấy phần tử index 1 → AZ thứ hai (us-west-2b)
+  # MapPublicIpOnLaunch: true → EC2 launch vào subnet này tự nhận Public IP
+
+  PublicSubnetA:
+    Type: AWS::EC2::Subnet
+    Properties:
+      VpcId: !Ref VPC
+      CidrBlock: 10.1.1.0/24
+      AvailabilityZone: !Select [0, !GetAZs ""]
+      MapPublicIpOnLaunch: true         # Chỉ Public Subnet mới bật cái này
+      Tags:
+        - Key: Name
+          Value: HAI-PublicSubnet-A
+
+  PublicSubnetB:
+    Type: AWS::EC2::Subnet
+    Properties:
+      VpcId: !Ref VPC
+      CidrBlock: 10.1.2.0/24
+      AvailabilityZone: !Select [1, !GetAZs ""]
+      MapPublicIpOnLaunch: true
+      Tags:
+        - Key: Name
+          Value: HAI-PublicSubnet-B
+
+  # App và Data Subnet không có MapPublicIpOnLaunch → mặc định false → chỉ có Private IP
+  AppSubnetA:
+    Type: AWS::EC2::Subnet
+    Properties:
+      VpcId: !Ref VPC
+      CidrBlock: 10.1.3.0/24
+      AvailabilityZone: !Select [0, !GetAZs ""]
+      Tags:
+        - Key: Name
+          Value: HAI-AppSubnet-A
+
+  AppSubnetB:
+    Type: AWS::EC2::Subnet
+    Properties:
+      VpcId: !Ref VPC
+      CidrBlock: 10.1.4.0/24
+      AvailabilityZone: !Select [1, !GetAZs ""]
+      Tags:
+        - Key: Name
+          Value: HAI-AppSubnet-B
+
+  DataSubnetA:
+    Type: AWS::EC2::Subnet
+    Properties:
+      VpcId: !Ref VPC
+      CidrBlock: 10.1.5.0/24
+      AvailabilityZone: !Select [0, !GetAZs ""]
+      Tags:
+        - Key: Name
+          Value: HAI-DataSubnet-A
+
+  DataSubnetB:
+    Type: AWS::EC2::Subnet
+    Properties:
+      VpcId: !Ref VPC
+      CidrBlock: 10.1.6.0/24
+      AvailabilityZone: !Select [1, !GetAZs ""]
+      Tags:
+        - Key: Name
+          Value: HAI-DataSubnet-B
+
+  # ===== NAT Gateway =====
+  # EIP: Elastic IP tĩnh gắn vào NAT, IP này không đổi dù restart
+  EIP:
+    Type: AWS::EC2::EIP
+    Properties:
+      Tags:
+        - Key: Name
+          Value: HAI-EIP
+
+  # NAT phải đặt trong Public Subnet vì nó cần đường ra internet qua IGW
+  # !GetAtt khác !Ref: dùng để lấy thuộc tính con của resource
+  # EIP.AllocationId → ID cấp phát của EIP (NAT cần cái này, không cần IP trực tiếp)
+  NAT:
+    Type: AWS::EC2::NatGateway
+    Properties:
+      AllocationId: !GetAtt EIP.AllocationId
+      SubnetId: !Ref PublicSubnetA
+      Tags:
+        - Key: Name
+          Value: HAI-NAT
+
+  # ===== Route Tables =====
+  PublicRT:
+    Type: AWS::EC2::RouteTable
+    Properties:
+      VpcId: !Ref VPC
+      Tags:
+        - Key: Name
+          Value: HAI-PublicRT
+
+  # DependsOn: bắt buộc IGW phải gắn vào VPC xong rồi mới tạo route
+  # Nếu không có DependsOn, route có thể được tạo trước khi IGW sẵn sàng → lỗi
+  # DestinationCidrBlock: 0.0.0.0/0 → route mặc định, mọi traffic không khớp rule nào đi theo đây
+  PublicRoute:
+    Type: AWS::EC2::Route
+    DependsOn: AttachIGW
+    Properties:
+      RouteTableId: !Ref PublicRT
+      DestinationCidrBlock: 0.0.0.0/0
+      GatewayId: !Ref IGW              # Public → ra internet trực tiếp qua IGW
+
+  # App Subnet dùng route table này, có NAT để ra internet
+  PrivateRT:
+    Type: AWS::EC2::RouteTable
+    Properties:
+      VpcId: !Ref VPC
+      Tags:
+        - Key: Name
+          Value: HAI-AppRT
+
+  PrivateRoute:
+    Type: AWS::EC2::Route
+    Properties:
+      RouteTableId: !Ref PrivateRT
+      DestinationCidrBlock: 0.0.0.0/0
+      NatGatewayId: !Ref NAT           # App → ra internet gián tiếp qua NAT (ẩn IP thật)
+
+  # DB dùng route table riêng, KHÔNG có route 0.0.0.0/0
+  # → DB không có đường ra internet, cô lập hoàn toàn
+  DataRT:
+    Type: AWS::EC2::RouteTable
+    Properties:
+      VpcId: !Ref VPC
+      Tags:
+        - Key: Name
+          Value: HAI-DataRT
+
+  # ===== Gắn Subnet vào Route Table =====
+  PublicAssocA:
+    Type: AWS::EC2::SubnetRouteTableAssociation
+    Properties:
+      SubnetId: !Ref PublicSubnetA
+      RouteTableId: !Ref PublicRT
+
+  PublicAssocB:
+    Type: AWS::EC2::SubnetRouteTableAssociation
+    Properties:
+      SubnetId: !Ref PublicSubnetB
+      RouteTableId: !Ref PublicRT
+
+  PrivateAssoc1:
+    Type: AWS::EC2::SubnetRouteTableAssociation
+    Properties:
+      SubnetId: !Ref AppSubnetA
+      RouteTableId: !Ref PrivateRT
+
+  PrivateAssoc2:
+    Type: AWS::EC2::SubnetRouteTableAssociation
+    Properties:
+      SubnetId: !Ref AppSubnetB
+      RouteTableId: !Ref PrivateRT
+
+  DataAssoc1:
+    Type: AWS::EC2::SubnetRouteTableAssociation
+    Properties:
+      SubnetId: !Ref DataSubnetA
+      RouteTableId: !Ref DataRT
+
+  DataAssoc2:
+    Type: AWS::EC2::SubnetRouteTableAssociation
+    Properties:
+      SubnetId: !Ref DataSubnetB
+      RouteTableId: !Ref DataRT
+
+  # ===== VPC Endpoint (S3 Gateway) =====
+  # Thay vì traffic đến S3 phải ra internet, VPCE tạo đường đi nội bộ trong AWS
+  # → Không tốn NAT bandwidth, bảo mật hơn, không tính phí data transfer ra internet
+  # !Sub thay thế biến trong string: ${AWS::Region} là Pseudo Parameter, AWS tự điền region
+  # → com.amazonaws.us-west-2.s3
+  # RouteTableIds: inject route đặc biệt vào các route table này
+  # → chỉ App cần, DB không cần vì backup đi qua App
+  S3Endpoint:
+    Type: AWS::EC2::VPCEndpoint
+    Properties:
+      VpcId: !Ref VPC
+      ServiceName: !Sub com.amazonaws.${AWS::Region}.s3
+      RouteTableIds:
+        - !Ref PrivateRT               # App → S3 qua VPCE
+
+# Outputs: export giá trị ra ngoài để stack khác dùng !ImportValue
+# Nếu không có Export thì stack khác không thể tham chiếu tới
+Outputs:
+  VpcId:
+    Value: !Ref VPC
+    Export:
+      Name: VpcId
+
+  PublicSubnetA:
+    Value: !Ref PublicSubnetA
+    Export:
+      Name: PublicSubnetA
+
+  PublicSubnetB:
+    Value: !Ref PublicSubnetB
+    Export:
+      Name: PublicSubnetB
+
+  AppSubnetA:
+    Value: !Ref AppSubnetA
+    Export:
+      Name: AppSubnetA
+
+  AppSubnetB:
+    Value: !Ref AppSubnetB
+    Export:
+      Name: AppSubnetB
+
+  DataSubnetA:
+    Value: !Ref DataSubnetA
+    Export:
+      Name: DataSubnetA
+
+  DataSubnetB:
+    Value: !Ref DataSubnetB
+    Export:
+      Name: DataSubnetB
+
+
 ```
 
 **Validate command:**
 ```bash
-aws cloudformation validate-template --template-body file://w3-partial.yaml
+aws cloudformation create-stack --stack-name network 
+--template-body file://network.yaml
+aws cloudformation wait stack-create-complete --stack-name network
 ```
 
 **Expected output:**
 ```json
 {
-    "Parameters": [],
-    "Description": "W3 Partial Template — DynamoDB Table xbrain-orders",
-    "Capabilities": [],
-    "CapabilitiesReason": ""
+    "StackId": "arn:aws:cloudformation:us-west-2:664945433260:stack/network/9e573220-3eea-11f1-bb6e-06e166181a0d",
+    "OperationId": "9e586aa0-3eea-11f1-bb6e-06e166181a0d"
 }
 ```
 
-![CFN validate output](./screenshots/s8-cfn-validate.png)
-<!-- EDIT: Chụp terminal với validate output thật -->
+**Template (`security.yaml`):**
 
-**Git commit:** [commit XXXXXXX](https://github.com/org/repo/commit/XXXXXXX)
-<!-- EDIT: Đổi link commit thật sau khi push template lên repo -->
+**Scenario:** Viết partial CloudFormation template cho việc tạo các SGs, NACLs.
 
-**Post-state:** Template đã được validate và committed vào repo. Có thể deploy bằng `aws cloudformation create-stack` hoặc qua CI/CD.
+**Pre-state:** Không có IaC — resource được tạo thủ công qua console.
+
+```yaml
+AWSTemplateFormatVersion: '2010-09-09'
+Description: Security Layer
+
+Resources:
+
+  # ===== Security Groups =====
+  # Security Group là stateful: chỉ cần allow inbound, outbound response tự động được phép
+  # Outbound mặc định allow all nếu không khai báo SecurityGroupEgress
+  # !ImportValue: lấy giá trị đã Export từ stack khác (ở đây là stack network)
+
+  ExternalALBSG:
+    Type: AWS::EC2::SecurityGroup
+    Properties:
+      GroupName: HAI-sg-external-alb    # Tên hiển thị trên Console, không có thì AWS tự đặt tên random
+      GroupDescription: External ALB - allow HTTP and HTTPS from internet
+      VpcId: !ImportValue VpcId
+      SecurityGroupIngress:
+        - IpProtocol: tcp               # tcp=6, udp=17, icmp=1, -1=all
+          FromPort: 443
+          ToPort: 443
+          CidrIp: 0.0.0.0/0            # Cho phép từ mọi IP trên internet
+        - IpProtocol: tcp
+          FromPort: 80
+          ToPort: 80
+          CidrIp: 0.0.0.0/0
+      Tags:
+        - Key: Name
+          Value: HAI-sg-external-alb
+
+  WebSG:
+    Type: AWS::EC2::SecurityGroup
+    Properties:
+      GroupName: HAI-sg-web
+      GroupDescription: Web tier - allow HTTP from External ALB only
+      VpcId: !ImportValue VpcId
+      SecurityGroupIngress:
+        - IpProtocol: tcp
+          FromPort: 80
+          ToPort: 80
+          # SourceSecurityGroupId thay vì CidrIp:
+          # → không dùng IP cứng mà dùng SG làm source
+          # → "chỉ cho phép traffic từ resource nào đang attach ExternalALBSG"
+          # → linh hoạt hơn vì IP của ALB có thể thay đổi
+          SourceSecurityGroupId: !Ref ExternalALBSG
+      Tags:
+        - Key: Name
+          Value: HAI-sg-web
+
+  InternalALBSG:
+    Type: AWS::EC2::SecurityGroup
+    Properties:
+      GroupName: HAI-sg-internal-alb
+      GroupDescription: Internal ALB - allow HTTP from Web tier only
+      VpcId: !ImportValue VpcId
+      SecurityGroupIngress:
+        - IpProtocol: tcp
+          FromPort: 80
+          ToPort: 80
+          SourceSecurityGroupId: !Ref WebSG   # Chỉ Web mới gọi vào Internal ALB
+      Tags:
+        - Key: Name
+          Value: HAI-sg-internal-alb
+
+  AppSG:
+    Type: AWS::EC2::SecurityGroup
+    Properties:
+      GroupName: HAI-sg-app
+      GroupDescription: App tier - allow from Internal ALB only
+      VpcId: !ImportValue VpcId
+      SecurityGroupIngress:
+        - IpProtocol: tcp
+          FromPort: 9000
+          ToPort: 9000
+          SourceSecurityGroupId: !Ref InternalALBSG   # Chỉ Internal ALB mới gọi vào App
+      Tags:
+        - Key: Name
+          Value: HAI-sg-app
+
+  DBSG:
+    Type: AWS::EC2::SecurityGroup
+    Properties:
+      GroupName: HAI-sg-db
+      GroupDescription: DB tier - allow MySQL from App tier only
+      VpcId: !ImportValue VpcId
+      SecurityGroupIngress:
+        - IpProtocol: tcp
+          FromPort: 3306                # MySQL port
+          ToPort: 3306
+          SourceSecurityGroupId: !Ref AppSG   # Chỉ App mới gọi vào DB
+      Tags:
+        - Key: Name
+          Value: HAI-sg-db
+
+  EndpointSG:
+    Type: AWS::EC2::SecurityGroup
+    Properties:
+      GroupName: HAI-sg-endpoint
+      GroupDescription: VPC Endpoint - allow HTTPS from App tier only
+      VpcId: !ImportValue VpcId
+      SecurityGroupIngress:
+        - IpProtocol: tcp
+          FromPort: 443
+          ToPort: 443
+          SourceSecurityGroupId: !Ref AppSG   # Chỉ App mới dùng VPC Endpoint
+      Tags:
+        - Key: Name
+          Value: HAI-sg-endpoint
+
+  # ===== NACL cho Public Subnet =====
+  # NACL là stateless: phải khai báo cả inbound lẫn outbound
+  # Rule được xử lý theo thứ tự RuleNumber từ nhỏ → lớn, khớp rule nào thì áp dụng luôn
+  # Protocol: 6=TCP, 17=UDP, -1=tất cả
+  # Egress: false=inbound, true=outbound
+  NACL:
+    Type: AWS::EC2::NetworkAcl
+    Properties:
+      VpcId: !ImportValue VpcId
+      Tags:
+        - Key: Name
+          Value: HAI-NACL
+
+  InboundHTTP:
+    Type: AWS::EC2::NetworkAclEntry
+    Properties:
+      NetworkAclId: !Ref NACL
+      RuleNumber: 100
+      Protocol: 6
+      RuleAction: allow
+      Egress: false                     # Inbound
+      CidrBlock: 0.0.0.0/0
+      PortRange:
+        From: 80
+        To: 80
+
+  InboundHTTPS:
+    Type: AWS::EC2::NetworkAclEntry
+    Properties:
+      NetworkAclId: !Ref NACL
+      RuleNumber: 110
+      Protocol: 6
+      RuleAction: allow
+      Egress: false
+      CidrBlock: 0.0.0.0/0
+      PortRange:
+        From: 443
+        To: 443
+
+  # Ephemeral ports (1024-65535): NACL stateless nên cần allow dải port này
+  # Khi client gọi vào port 80, server trả response về port ngẫu nhiên phía client (trong dải này)
+  # Nếu không allow thì response bị chặn dù request vào được
+  InboundEphemeral:
+    Type: AWS::EC2::NetworkAclEntry
+    Properties:
+      NetworkAclId: !Ref NACL
+      RuleNumber: 200
+      Protocol: 6
+      RuleAction: allow
+      Egress: false
+      CidrBlock: 0.0.0.0/0
+      PortRange:
+        From: 1024
+        To: 65535
+
+  OutboundHTTP:
+    Type: AWS::EC2::NetworkAclEntry
+    Properties:
+      NetworkAclId: !Ref NACL
+      RuleNumber: 100
+      Protocol: 6
+      RuleAction: allow
+      Egress: true                      # Outbound
+      CidrBlock: 0.0.0.0/0
+      PortRange:
+        From: 80
+        To: 80
+
+  OutboundHTTPS:
+    Type: AWS::EC2::NetworkAclEntry
+    Properties:
+      NetworkAclId: !Ref NACL
+      RuleNumber: 110
+      Protocol: 6
+      RuleAction: allow
+      Egress: true
+      CidrBlock: 0.0.0.0/0
+      PortRange:
+        From: 443
+        To: 443
+
+  # Trả response về cho client qua ephemeral ports
+  OutboundEphemeral:
+    Type: AWS::EC2::NetworkAclEntry
+    Properties:
+      NetworkAclId: !Ref NACL
+      RuleNumber: 200
+      Protocol: 6
+      RuleAction: allow
+      Egress: true
+      CidrBlock: 0.0.0.0/0
+      PortRange:
+        From: 1024
+        To: 65535
+
+  # Gắn NACL vào subnet, một subnet chỉ gắn được 1 NACL tại một thời điểm
+  NACLAssocPublicA:
+    Type: AWS::EC2::SubnetNetworkAclAssociation
+    Properties:
+      SubnetId: !ImportValue PublicSubnetA
+      NetworkAclId: !Ref NACL
+
+  NACLAssocPublicB:
+    Type: AWS::EC2::SubnetNetworkAclAssociation
+    Properties:
+      SubnetId: !ImportValue PublicSubnetB
+      NetworkAclId: !Ref NACL
+
+  # ===== NACL cho App Subnet =====
+  # Chỉ nhận traffic từ trong VPC (10.1.0.0/16), không nhận từ internet trực tiếp
+  AppNACL:
+    Type: AWS::EC2::NetworkAcl
+    Properties:
+      VpcId: !ImportValue VpcId
+      Tags:
+        - Key: Name
+          Value: HAI-AppNACL
+
+  # Chỉ cho Internal ALB (nằm trong VPC) gọi vào port 9000
+  AppNACLInboundApp:
+    Type: AWS::EC2::NetworkAclEntry
+    Properties:
+      NetworkAclId: !Ref AppNACL
+      RuleNumber: 100
+      Protocol: 6
+      RuleAction: allow
+      Egress: false
+      CidrBlock: 10.1.0.0/16           # Toàn bộ VPC, không phải 0.0.0.0/0
+      PortRange:
+        From: 9000
+        To: 9000
+
+  # Nhận response trở về từ DB hoặc các service nội bộ (qua ephemeral ports)
+  AppNACLInboundEphemeral:
+    Type: AWS::EC2::NetworkAclEntry
+    Properties:
+      NetworkAclId: !Ref AppNACL
+      RuleNumber: 200
+      Protocol: 6
+      RuleAction: allow
+      Egress: false
+      CidrBlock: 10.1.0.0/16
+      PortRange:
+        From: 1024
+        To: 65535
+
+  # Cho App gọi vào DB (port 3306), gọi VPCE, gọi NAT — tất cả đều trong VPC
+  AppNACLOutboundVPC:
+    Type: AWS::EC2::NetworkAclEntry
+    Properties:
+      NetworkAclId: !Ref AppNACL
+      RuleNumber: 100
+      Protocol: 6
+      RuleAction: allow
+      Egress: true
+      CidrBlock: 10.1.0.0/16           # Chỉ trong VPC
+      PortRange:
+        From: 0
+        To: 65535
+
+  # Cho App ra internet qua NAT để gọi API ngoài, pull packages
+  # Chỉ mở HTTPS (443), không mở HTTP để tránh gọi endpoint không an toàn
+  AppNACLOutboundInternet:
+    Type: AWS::EC2::NetworkAclEntry
+    Properties:
+      NetworkAclId: !Ref AppNACL
+      RuleNumber: 200
+      Protocol: 6
+      RuleAction: allow
+      Egress: true
+      CidrBlock: 0.0.0.0/0
+      PortRange:
+        From: 443
+        To: 443
+
+  AppNACLAssocA:
+    Type: AWS::EC2::SubnetNetworkAclAssociation
+    Properties:
+      SubnetId: !ImportValue AppSubnetA
+      NetworkAclId: !Ref AppNACL
+
+  AppNACLAssocB:
+    Type: AWS::EC2::SubnetNetworkAclAssociation
+    Properties:
+      SubnetId: !ImportValue AppSubnetB
+      NetworkAclId: !Ref AppNACL
+
+  # ===== NACL cho Data Subnet =====
+  # Chặt nhất: chỉ nhận từ AppSubnet, không có đường ra internet
+  DataNACL:
+    Type: AWS::EC2::NetworkAcl
+    Properties:
+      VpcId: !ImportValue VpcId
+      Tags:
+        - Key: Name
+          Value: HAI-DataNACL
+
+  # Chỉ AppSubnetA (10.1.3.0/24) mới được kết nối MySQL
+  DataNACLInboundMySQL:
+    Type: AWS::EC2::NetworkAclEntry
+    Properties:
+      NetworkAclId: !Ref DataNACL
+      RuleNumber: 100
+      Protocol: 6
+      RuleAction: allow
+      Egress: false
+      CidrBlock: 10.1.3.0/24           # Chính xác đến từng subnet, không phải cả VPC
+      PortRange:
+        From: 3306
+        To: 3306
+
+  # Chỉ AppSubnetB (10.1.4.0/24) mới được kết nối MySQL
+  DataNACLInboundMySQLB:
+    Type: AWS::EC2::NetworkAclEntry
+    Properties:
+      NetworkAclId: !Ref DataNACL
+      RuleNumber: 110
+      Protocol: 6
+      RuleAction: allow
+      Egress: false
+      CidrBlock: 10.1.4.0/24
+      PortRange:
+        From: 3306
+        To: 3306
+
+  # Nhận ephemeral ports (response từ App sau khi DB gọi ra — ít dùng nhưng cần cho stateless NACL)
+  DataNACLInboundEphemeral:
+    Type: AWS::EC2::NetworkAclEntry
+    Properties:
+      NetworkAclId: !Ref DataNACL
+      RuleNumber: 200
+      Protocol: 6
+      RuleAction: allow
+      Egress: false
+      CidrBlock: 10.1.0.0/16
+      PortRange:
+        From: 1024
+        To: 65535
+
+  # Chỉ trả response về AppSubnetA qua ephemeral ports
+  # Không có rule 0.0.0.0/0 → DB không thể gửi packet ra ngoài VPC
+  DataNACLOutboundToApp:
+    Type: AWS::EC2::NetworkAclEntry
+    Properties:
+      NetworkAclId: !Ref DataNACL
+      RuleNumber: 100
+      Protocol: 6
+      RuleAction: allow
+      Egress: true
+      CidrBlock: 10.1.3.0/24
+      PortRange:
+        From: 1024
+        To: 65535
+
+  # Chỉ trả response về AppSubnetB
+  DataNACLOutboundToAppB:
+    Type: AWS::EC2::NetworkAclEntry
+    Properties:
+      NetworkAclId: !Ref DataNACL
+      RuleNumber: 110
+      Protocol: 6
+      RuleAction: allow
+      Egress: true
+      CidrBlock: 10.1.4.0/24
+      PortRange:
+        From: 1024
+        To: 65535
+
+  DataNACLAssocA:
+    Type: AWS::EC2::SubnetNetworkAclAssociation
+    Properties:
+      SubnetId: !ImportValue DataSubnetA
+      NetworkAclId: !Ref DataNACL
+
+  DataNACLAssocB:
+    Type: AWS::EC2::SubnetNetworkAclAssociation
+    Properties:
+      SubnetId: !ImportValue DataSubnetB
+      NetworkAclId: !Ref DataNACL
+
+# Outputs: export SG ID để stack compute dùng !ImportValue
+Outputs:
+  ExternalALBSG:
+    Value: !Ref ExternalALBSG
+    Export:
+      Name: ExternalALBSG
+
+  WebSG:
+    Value: !Ref WebSG
+    Export:
+      Name: WebSG
+
+  InternalALBSG:
+    Value: !Ref InternalALBSG
+    Export:
+      Name: InternalALBSG
+
+  AppSG:
+    Value: !Ref AppSG
+    Export:
+      Name: AppSG
+
+  DBSG:
+    Value: !Ref DBSG
+    Export:
+      Name: DBSG
+
+  EndpointSG:
+    Value: !Ref EndpointSG
+    Export:
+      Name: EndpointSG
+
+
+```
+**Validate command:**
+```bash
+aws cloudformation create-stack --stack-name security 
+--template-body file://security.yaml
+aws cloudformation wait stack-create-complete --stack-name security
+```
+
+**Expected output:**
+```json
+{
+    "StackId": "arn:aws:cloudformation:us-west-2:664945433260:stack/network/9e573220-3eea-11f1-bb6e-06e166181a0d",
+    "OperationId": "9e586aa0-3eea-11f1-bb6e-06e166181a0d"
+}
+```
 
 **Reflection:** Viết CFN template giúp thấy rõ structure của resource hơn so với click console — attribute types phải khai báo trước, key schema phải consistent với attribute definitions. Lần sau sẽ viết template trước rồi mới deploy thay vì làm ngược lại. `validate-template` chỉ check syntax, không check logic (ví dụ: sai region, sai ARN) — cần `create-stack` thật để catch runtime errors.
 <!-- EDIT: Viết reflection thật dựa trên trải nghiệm thực tế -->
