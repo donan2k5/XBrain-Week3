@@ -184,7 +184,7 @@ CREATE NONCLUSTERED INDEX idx_order_item_order_id
 
 - [x] VPC diagram show **3 tiers có label**: Public / Private Application / Private Database
 
-![image](https://hackmd.io/_uploads/BJTd3rdTZg.png)
+![image](https://hackmd.io/_uploads/SJmBOvdaZg.png)
 
 
 
@@ -192,7 +192,7 @@ CREATE NONCLUSTERED INDEX idx_order_item_order_id
 
 - [x] **S3 Gateway Endpoint** provision và labeled trên diagram (với route table entry)
 
-![image](https://hackmd.io/_uploads/BytM1UDpZx.png)
+![image](https://hackmd.io/_uploads/HkGgqIdabe.png)
 
 
 **Notes:** VPC Gateway Endpoint `vpce-0945ef943cecc4994` cho S3. Route table `rtb-051e518c8e9856fb5` có entry `pl-68a54001 (com.amazonaws.us-west-2.s3) → vpce-0945ef943cecc4994`. S3 traffic từ private subnet sẽ đi qua VPC Gateway EndPoint mà không đi qua NAT Gateway, giúp tiết kiệm cost.
@@ -241,6 +241,9 @@ ORDER BY o.OrderDateTime DESC, oi.OrderItemID ASC;
 
 
 ## Section 5 — Bedrock
+![image](https://hackmd.io/_uploads/SyK8MIO6We.png)
+Diagram mô tả kiến trúc hệ thống Retrieval-Augmented Generation (RAG) sử dụng Amazon S3 làm data source, AWS Lambda làm tầng xử lý trung gian, và Amazon Bedrock để thực hiện truy vấn và sinh câu trả lời. 
+
 ### 5.1 Create knowledge file for Bedrock 
  Tạo **3 documents** làm dữ liệu đầu vào cho Knowledge Base:
 - `product_faq.txt`
@@ -598,18 +601,211 @@ Thực hiện tại: **IAM > Policies > Create Policy (Visual Editor)**
 
 
 ### 5.6 Config Sync automation when upload S3
+**Thiết lập S3 Event Trigger (Auto Sync Knowledge Base)**
+
+**1. Truy cập S3 Bucket**
+
+- Mở **Amazon S3**
+- Chọn bucket: `group3-kbai`
 ![Ảnh chụp màn hình 2026-04-23 164513](https://hackmd.io/_uploads/B1LF5DPabg.png)
+**2. Tạo Event Notification**
+
+- Vào tab **Properties**
+- Kéo xuống mục **Event notifications**
+- Nhấn **Create event notification**
+
 ![Ảnh chụp màn hình 2026-04-23 164523](https://hackmd.io/_uploads/H1lUK9wPabe.png)
+
+**3. Cấu hình Event**
+
+- Event name: `AutoSync`
+- Event types:
 ![Ảnh chụp màn hình 2026-04-23 164532](https://hackmd.io/_uploads/SyItqvv6Zg.png)
+ - Chọn: **All object create events**
 ![Ảnh chụp màn hình 2026-04-23 164543](https://hackmd.io/_uploads/r1wF9DwTZl.png)
+
+**4. Cấu hình Destination**
+
+- **Destination type:** Lambda Function
+- **Lambda function:**
+  - Chọn: `Chatbot_Orchestrator`
+
 ![Ảnh chụp màn hình 2026-04-23 164553](https://hackmd.io/_uploads/HJvtqDv6bx.png)
+**5. Hoàn tất**
+
+- Nhấn **Save changes**
+
 ![Ảnh chụp màn hình 2026-04-23 164609](https://hackmd.io/_uploads/BJwF9wvT-x.png)
 
+**Ghi chú**
 
+- Khi có file mới upload lên S3:
+  → Lambda `Chatbot_Orchestrator` sẽ tự động được trigger
+- Có thể dùng để:
+  - Tự động gọi **StartIngestionJob**
+  - Sync lại Knowledge Base (RAG pipeline)
+- Đảm bảo:
+  - Lambda đã có quyền đọc S3 (`GetObject`, `ListBucket`)
+  - IAM policy đã attach đúng
 
+**Flow hoạt động**
 
+S3 (upload file)  
+→ Trigger Event  
+→ Lambda (Chatbot_Orchestrator)  
+→ Bedrock Knowledge Base (Ingestion / Retrieve)
+
+---
 
 ### 5.7 Show evidence
+**Kiểm thử hệ thống Chatbot RAG (Lambda + Bedrock + S3)**
+
+---
+
+## Kịch bản: Test Chatbot hiện tại
+
+**Bước thực hiện**
+
+1. Vào **AWS Lambda**
+2. Chọn function: `Chatbot_Orchestrator`
+3. Chuyển sang tab **Test**
+4. Nhập payload:
+
+```
+{
+  "question": "Sản phẩm có chính hãng không?"
+}
+```
+## Kịch bản : Upload dữ liệu mới & Tự động cập nhật Chatbot (RAG)
+
+```
+## Mục tiêu
+
+* Kiểm tra khả năng tự động cập nhật dữ liệu
+* Chứng minh hệ thống hoạt động theo mô hình RAG + Event-driven
+
+---
+
+## Bước 1: Tạo file dữ liệu
+
+Tạo file: **chinh_sach.txt**
+
+Nội dung:
+
+1. Đặt hàng (Ordering)
+   Khách hàng có thể đặt hàng qua website hoặc ứng dụng
+   Đơn hàng sẽ được xác nhận qua email trong vòng 5–10 phút
+
+2. Thanh toán (Payment)
+   Hỗ trợ các phương thức:
+
+* Thanh toán khi nhận hàng (COD)
+* Chuyển khoản ngân hàng
+  Đơn hàng chỉ được xử lý sau khi thanh toán thành công (trừ COD)
+
+3. Giao hàng (Shipping)
+   Thời gian giao hàng:
+
+* Nội thành: 1–2 ngày
+* Ngoại thành / tỉnh: 3–5 ngày
+  Phí vận chuyển được tính dựa trên địa chỉ nhận hàng
+
+---
+
+## Bước 2: Upload lên S3
+
+* Vào Amazon S3
+* Chọn bucket: **toan-chatbot-data-2026**
+* Upload file **chinh_sach.txt**
+
+---
+
+## Bước 3: Hệ thống tự động xử lý
+
+* S3 phát hiện file mới
+* Trigger Lambda: **Chatbot_Orchestrator**
+* Lambda thực hiện Sync Knowledge Base
+
+---
+
+## Bước 4: Kiểm tra log
+
+* Vào Lambda → Monitor → View CloudWatch logs
+
+Kết quả mong đợi thấy log:
+
+Detected new file... Starting Sync...
+
+---
+
+## Bước 5: Test lại chatbot
+
+### Test 1
+
+{
+"question": "Khách hàng có thể thanh toán bằng những cách nào?"
+}
+
+Kết quả:
+
+* COD
+* Chuyển khoản ngân hàng
+
+---
+
+### Test 2
+
+{
+"question": "Thời gian giao hàng là bao lâu?"
+}
+
+Kết quả:
+
+* Nội thành: 1–2 ngày
+* Ngoại thành/tỉnh: 3–5 ngày
+
+---
+
+### Test 3
+
+{
+"question": "Đơn hàng được xác nhận trong bao lâu?"
+}
+
+Kết quả:
+
+* 5–10 phút qua email
+
+---
+
+## Kết luận
+
+* Hệ thống tự động cập nhật dữ liệu từ S3
+* Không cần deploy lại code
+* Chatbot trả lời đúng theo dữ liệu mới
+
+---
+
+## Flow hệ thống
+
+Upload file → S3 → Trigger → Lambda → Bedrock KB → User hỏi → AI trả lời
+
+---
+
+## Điểm ăn điểm khi demo
+
+1. Hỏi trước khi upload → chưa có dữ liệu
+2. Upload file → hệ thống tự sync
+3. Hỏi lại → chatbot trả lời đúng
+
+→ Thể hiện Dynamic Knowledge Update + RAG hoàn chỉnh
+
+```
+
+
+
+
+
 ![Ảnh chụp màn hình 2026-04-23 164742](https://hackmd.io/_uploads/S1ngiPPpWx.png)
 ![Ảnh chụp màn hình 2026-04-23 164753](https://hackmd.io/_uploads/By2ejPPpbl.png)
 ![Ảnh chụp màn hình 2026-04-23 164800](https://hackmd.io/_uploads/By3esDwa-x.png)
@@ -634,6 +830,7 @@ Config trên console:
 
 
 <!-- EDIT: Đổi prefix list ID, vpce ID, NAT GW ID thật -->
+
 
 **Notes:** Entry `pl-68a54001 → vpce-0945ef943cecc4994` là S3 Gateway Endpoint. Traffic từ Lambda/app tier tới S3 đi qua VPC endpoint, không qua NAT Gateway — không tốn per-GB NAT processing fee (~$0.045/GB), và ở lại trong AWS backbone (không ra internet).
 <!-- EDIT: Điều chỉnh reasoning thật -->
@@ -1421,7 +1618,3 @@ aws cloudformation wait stack-create-complete --stack-name security
 **Reflection:** Viết CFN template giúp thấy rõ structure của resource hơn so với click console — attribute types phải khai báo trước, key schema phải consistent với attribute definitions. Lần sau sẽ viết template trước rồi mới deploy thay vì làm ngược lại. `validate-template` chỉ check syntax, không check logic (ví dụ: sai region, sai ARN) — cần `create-stack` thật để catch runtime errors.
 <!-- EDIT: Viết reflection thật dựa trên trải nghiệm thực tế -->
 
----
-
-*Evidence Pack hoàn chỉnh. Slides thứ Sáu derive từ file này — copy 8-12 screenshots + captions vào deck và link ngược lại commit markdown này.*
-<!-- EDIT: Xóa dòng này sau khi done, hoặc giữ lại như reminder -->
